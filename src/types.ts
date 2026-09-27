@@ -60,6 +60,33 @@ export interface VersionSnapshot {
   snapshot: Omit<ProjectState, 'versions'>;
 }
 
+export interface CorrectionLineChange {
+  lineId: string;
+  index: number;
+  source: string;
+  brailleBefore: string;
+  brailleAfter: string;
+  statusBefore: LineStatus;
+  statusAfter: LineStatus;
+  noteBefore: string;
+  beforeTokens: BrailleToken[];
+}
+
+export interface CorrectionRecord {
+  id: string;
+  createdAt: string;
+  ruleId: string;
+  ruleSetId: string;
+  ruleKind: RuleKind;
+  ruleSource: string;
+  ruleOutput: string;
+  affectedCount: number;
+  approvedResetCount: number;
+  restored: boolean;
+  restoredAt?: string;
+  changes: CorrectionLineChange[];
+}
+
 export interface ProjectState {
   id: string;
   title: string;
@@ -69,6 +96,7 @@ export interface ProjectState {
   lines: TextbookLine[];
   selectedLineId: string;
   issues: ProofIssue[];
+  corrections: CorrectionRecord[];
   versions: VersionSnapshot[];
   lastCheckedAt: string;
   updatedAt: string;

@@ -202,15 +202,36 @@ function analyzeLine(line: TextbookLine, previousLine?: TextbookLine): { line: T
   return { line: nextLine, issues };
 }
 
+/** 按当前规则集重算单行：重转录 token、重查问题，并保留行的状态与备注。 */
+export function inspectLine(line: TextbookLine, ruleSet: RuleSet, previousLine?: TextbookLine): { line: TextbookLine; issues: ProofIssue[] } {
+  const tokens = transcribeLine(line.source, ruleSet, Boolean(previousLine?.source.trimEnd().endsWith('-')));
+  return analyzeLine({ ...line, tokens }, previousLine);
+}
+
+/** 仅同步跨行连接标记（↳）与 continues 标志，不改写其他 token，用于局部恢复后校正邻接行。 */
+export function syncContinuationMarkers(lines: TextbookLine[]): TextbookLine[] {
+  return lines.map((line, index) => {
+    const continuesPrevious = Boolean(lines[index - 1]?.source.trimEnd().endsWith('-'));
+    const continuesNext = line.source.trimEnd().endsWith('-');
+    const hadMarker = line.tokens[0]?.braille === '↳ ';
+    if (continuesPrevious === hadMarker && line.continuesPrevious === continuesPrevious && line.continuesNext === continuesNext) {
+      return line;
+    }
+    const coreTokens = line.tokens.filter((token, tokenIndex) => !(tokenIndex === 0 && token.braille === '↳ '));
+    const tokens = continuesPrevious
+      ? [{ id: uid('token'), text: '', braille: '↳ ', kind: 'special' as const, suspicious: true, offset: 0 }, ...coreTokens]
+      : coreTokens;
+    return { ...line, tokens, continuesPrevious, continuesNext };
+  });
+}
+
 export function analyzeProject(state: ProjectState): ProjectState {
   const ruleSet = state.ruleSets.find((item) => item.id === state.activeRuleSetId) ?? state.ruleSets[0];
   const nextLines: TextbookLine[] = [];
   const issues: ProofIssue[] = [];
 
   state.lines.forEach((line, index) => {
-    const previousSourceContinues = Boolean(state.lines[index - 1]?.source.trimEnd().endsWith('-'));
-    const tokens = transcribeLine(line.source, ruleSet, previousSourceContinues);
-    const analyzed = analyzeLine({ ...line, tokens }, state.lines[index - 1]);
+    const analyzed = inspectLine(line, ruleSet, state.lines[index - 1]);
     nextLines.push(analyzed.line);
     issues.push(...analyzed.issues);
   });
@@ -243,8 +264,12 @@ export function makeRule(source: string, output: string, suspicious: boolean, ki
   };
 }
 
+export function brailleText(tokens: BrailleToken[]): string {
+  return tokens.map((token) => token.braille).join('');
+}
+
 export function outputText(state: ProjectState): string {
-  return state.lines.map((line, index) => `${String(index + 1).padStart(3, '0')}  ${line.tokens.map((token) => token.braille).join('')}`).join('\n');
+  return state.lines.map((line, index) => `${String(index + 1).padStart(3, '0')}  ${brailleText(line.tokens)}`).join('\n');
 }
 
 export function brailleCellCount(state: ProjectState): number {

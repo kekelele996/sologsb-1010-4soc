@@ -166,10 +166,6 @@ md-linear-progress { width: 100%; --md-linear-progress-active-indicator-color: #
 .issue-chip.info { color: #315e70; background: #e2f3f8; }
 .note-field { margin-top: 9px; --md-outlined-text-field-container-height: 42px; }
 
-.inspector-tabs { height: 50px; display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); background: white; }
-.inspector-tabs button { border: 0; border-bottom: 2px solid transparent; background: transparent; cursor: pointer; color: #697671; font-size: 12px; }
-.inspector-tabs button.active { color: #244f43; border-bottom-color: #39715f; font-weight: 700; }
-.inspector-tabs span { display: inline-grid; place-items: center; min-width: 18px; height: 18px; margin-left: 4px; padding: 0 4px; border-radius: 9px; background: #f2c477; color: #553500; font-size: 10px; }
 .inspector-body { flex: 1; overflow: auto; padding: 14px; }
 .issue-group, .rule-detail-card, .snapshot-callout { padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: white; margin-bottom: 10px; }
 .issue-group-head { display: grid; grid-template-columns: 12px 1fr; gap: 9px; }
@@ -199,6 +195,83 @@ md-linear-progress { width: 100%; --md-linear-progress-active-indicator-color: #
 .timeline-dot { width: 9px; height: 9px; margin-top: 4px; margin-left: -9px; border: 2px solid #f7faf8; border-radius: 50%; background: #4c806f; }
 .timeline-item strong { font-size: 12px; }
 .timeline-item p { margin: 3px 0; color: var(--muted); font-size: 10px; }
+
+/* 批量修正：预览弹窗 */
+.dialog-scrim {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(13, 27, 23, .46);
+  display: flex; align-items: center; justify-content: center; padding: 36px;
+}
+.dialog-card {
+  width: min(880px, 100%); max-height: calc(100vh - 72px);
+  display: flex; flex-direction: column;
+  background: var(--paper); border-radius: 16px;
+  box-shadow: 0 24px 64px rgba(8, 26, 21, .28);
+  border: 1px solid #cfdad5; overflow: hidden;
+}
+.dialog-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 20px 22px 14px; border-bottom: 1px solid var(--line); background: #f4faf6;
+}
+.dialog-head h2 { margin: 6px 0 6px; font: 700 18px/1.3 Georgia, serif; color: #173b32; }
+.dialog-head p { margin: 0; color: #4e5f5a; font-size: 12px; line-height: 1.6; }
+.dialog-head md-icon-button { flex-shrink: 0; }
+.dialog-body { flex: 1; padding: 16px 22px; }
+.dialog-footer {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 13px 22px; border-top: 1px solid var(--line); background: #f7faf8;
+}
+
+/* 修正前后差异行（弹窗与修正记录共用） */
+.correction-diff-list { display: flex; flex-direction: column; gap: 10px; }
+.correction-diff-row { border: 1px solid #d8e0dc; border-radius: 11px; background: white; overflow: hidden; }
+.correction-diff-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; background: #eef4f1; border-bottom: 1px solid #dde5e1;
+}
+.correction-line-no { font: 700 10px/1 monospace; color: #4d6b60; background: #ddeae4; padding: 3px 7px; border-radius: 5px; white-space: nowrap; }
+.correction-source { font-size: 12px; color: #2b3a35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.correction-diff-grid { display: grid; grid-template-columns: minmax(0, 1fr) 26px minmax(0, 1fr); align-items: stretch; }
+.diff-cell { min-width: 0; padding: 10px 12px 11px; }
+.diff-cell.before { background: #fff8f5; }
+.diff-cell.after { background: #f1f8f4; }
+.diff-arrow { display: grid; place-items: center; color: #7d968d; font-size: 15px; }
+.diff-cell-label { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10px; margin-bottom: 6px; }
+.diff-braille { font: 18px/1.45 "Apple Braille", "Segoe UI Symbol", sans-serif; color: #1e2b27; word-break: break-word; }
+.diff-cell.before .diff-braille { color: #8a4b35; }
+.diff-cell.after .diff-braille { color: #27604b; }
+.diff-note { margin-top: 5px; font-size: 10px; color: #6f7d78; line-height: 1.5; }
+.line-missing { color: var(--warning); font-style: normal; margin-left: 4px; }
+.status-pill { display: inline-block; padding: 2px 7px; border-radius: 9px; font-size: 10px; line-height: 1.5; }
+.status-pill.unchecked { color: #586662; background: #e7edeb; }
+.status-pill.questionable { color: #7a4700; background: #ffe7bc; }
+.status-pill.reviewed { color: #2c5570; background: #d8ebf6; }
+.status-pill.approved { color: #1f5740; background: #d4efe1; }
+
+/* 修正记录面板 */
+.correction-hint { padding: 10px 12px; margin-bottom: 12px; border-radius: 9px; background: #eaf4f0; color: #50655e; font-size: 10px; line-height: 1.6; }
+.correction-record { border: 1px solid var(--line); border-radius: 10px; background: white; margin-bottom: 10px; overflow: hidden; }
+.correction-record.restored { opacity: .82; }
+.correction-record > summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 11px 12px; cursor: pointer; list-style: none;
+}
+.correction-record > summary::-webkit-details-marker { display: none; }
+.correction-summary-main { min-width: 0; }
+.correction-summary-main strong { display: block; font-size: 12px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.correction-summary-main p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
+.pending-badge, .restored-badge { flex-shrink: 0; padding: 3px 8px; border-radius: 9px; font-size: 10px; white-space: nowrap; }
+.pending-badge { color: #7a4700; background: #ffe9c4; }
+.restored-badge { color: #315e4b; background: #dff2e8; }
+.correction-record-body { padding: 0 12px 12px; }
+.correction-record-body .correction-diff-grid { grid-template-columns: 1fr; }
+.correction-record-body .diff-arrow { display: none; }
+.correction-record-body .diff-cell.before { border-bottom: 1px solid #e4ebe7; }
+
+.inspector-tabs { height: 50px; display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--line); background: white; }
+.inspector-tabs button { border: 0; border-bottom: 2px solid transparent; background: transparent; cursor: pointer; color: #697671; font-size: 12px; }
+.inspector-tabs button.active { color: #244f43; border-bottom-color: #39715f; font-weight: 700; }
+.inspector-tabs span { display: inline-grid; place-items: center; min-width: 18px; height: 18px; margin-left: 4px; padding: 0 4px; border-radius: 9px; background: #f2c477; color: #553500; font-size: 10px; }
 
 @media (max-width: 1320px) {
   .workspace-grid { grid-template-columns: 285px minmax(520px, 1fr) 330px; }

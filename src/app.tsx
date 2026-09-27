@@ -1,11 +1,27 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
 import { analyzeProject, brailleCellCount, makeRule, outputText, updateRuleInSet } from './braille';
+import { buildBatchFix, CORRECTIONS_LIMIT, correctionId, mergeCorrections, restoreCorrection, type BatchFixPlan } from './corrections';
 import { createInitialProject } from './sample';
-import type { HistoryState, ProofIssue, ProjectState, TextbookLine, VersionSnapshot } from './types';
+import type { CorrectionRecord, HistoryState, ProofIssue, ProjectState, TextbookLine, VersionSnapshot } from './types';
 
 const STORAGE_KEY = 'sologsb-1010-braille-project-v1';
 const HISTORY_LIMIT = 60;
+
+const STATUS_LABEL: Record<TextbookLine['status'], string> = {
+  unchecked: '未检查',
+  reviewed: '已校对',
+  questionable: '待核对',
+  approved: '已批准',
+};
+
+const RULE_KIND_LABEL: Record<string, string> = {
+  letter: '字母',
+  number: '数字',
+  punctuation: '标点',
+  contraction: '缩写',
+  special: '特殊',
+};
 
 type HistoryAction =
   | { type: 'commit'; label: string; update: (state: ProjectState) => ProjectState }
@@ -55,6 +71,7 @@ function loadInitialState(): ProjectState {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as ProjectState;
+      if (!parsed.corrections) parsed.corrections = [];
       return analyzeProject(parsed);
     }
   } catch {
@@ -62,6 +79,7 @@ function loadInitialState(): ProjectState {
   }
   return createInitialProject();
 }
+
 
 function useProject() {
   const [history, dispatch] = useReducer(historyReducer, undefined, () => ({
@@ -414,7 +432,7 @@ function IssuesPanel({
             <div class="issue-actions">
               <md-text-button onClick={() => onJump(group[0].lineId)}>定位首处</md-text-button>
               {group[0].ruleId && group.length > 1 && (
-                <md-filled-tonal-button onClick={() => onBatchFix(group[0].ruleId!)}>停用规则并修正同类</md-filled-tonal-button>
+                <md-filled-tonal-button onClick={() => onBatchFix(group[0].ruleId!)}>停用规则并预览修正</md-filled-tonal-button>
               )}
               {!group[0].ruleId && group.length > 1 && (
                 <md-filled-tonal-button onClick={() => group.forEach((item) => onResolve(item.id))}>全部标记已处理</md-filled-tonal-button>
@@ -479,9 +497,139 @@ function VersionsPanel({ state, onSnapshot, onRestore }: { state: ProjectState; 
   );
 }
 
+function CorrectionDiffRows({ changes, lines }: { changes: CorrectionRecord['changes']; lines: TextbookLine[] }) {
+  return (
+    <div class="correction-diff-list">
+      {changes.map((change) => {
+        const currentLine = lines.find((line) => line.id === change.lineId);
+        return (
+          <div class="correction-diff-row" key={change.lineId}>
+            <div class="correction-diff-head">
+              <span class="correction-line-no">第 {change.index + 1} 行</span>
+              <span class="correction-source" title={change.source}>{change.source || '（空行）'}</span>
+            </div>
+            <div class="correction-diff-grid">
+              <div class="diff-cell before">
+                <div class="diff-cell-label"><span class={`status-pill ${change.statusBefore}`}>{STATUS_LABEL[change.statusBefore]}</span>修正前</div>
+                <div class="diff-braille">{change.brailleBefore || '—'}</div>
+                {change.noteBefore && <div class="diff-note">备注：{change.noteBefore}</div>}
+              </div>
+              <div class="diff-arrow" aria-hidden="true">→</div>
+              <div class="diff-cell after">
+                <div class="diff-cell-label"><span class={`status-pill ${change.statusAfter}`}>{STATUS_LABEL[change.statusAfter]}</span>修正后</div>
+                <div class="diff-braille">{change.brailleAfter || '—'}</div>
+                <div class="diff-note">备注：{change.noteBefore || '（无）'} {!currentLine && <em class="line-missing">该行当前已被删除，恢复时会插回原位</em>}</div>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function BatchFixDialog({
+  plan,
+  onCancel,
+  onConfirm,
+}: {
+  plan: BatchFixPlan;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div class="dialog-scrim" onClick={(event: MouseEvent) => { if (event.target === event.currentTarget) onCancel(); }}>
+      <div class="dialog-card" role="dialog" aria-modal="true" aria-label="停用规则前的修正预览">
+        <div class="dialog-head">
+          <div>
+            <span class="eyebrow">预览 · 尚未改动正文</span>
+            <h2>停用规则并修正受影响行</h2>
+            <p>
+              将停用 <strong>{RULE_KIND_LABEL[plan.rule.kind]}</strong>规则「{plan.rule.source} → {plan.rule.output}」；
+              共 {plan.changes.length} 行盲文会变化{plan.approvedResetCount > 0 ? `，其中 ${plan.approvedResetCount} 行已批准，将回到待核对` : ''}。
+              其他行的状态、备注和问题保持不变。
+            </p>
+          </div>
+          <md-icon-button aria-label="关闭预览" title="关闭（Esc）" onClick={onCancel}>×</md-icon-button>
+        </div>
+        {plan.changes.length === 0 ? (
+          <div class="empty-state compact">
+            <span>✓</span>
+            <strong>停用该规则不会改变任何行的盲文</strong>
+            <p>仍可确认以停用规则本身；课文正文不会被更新。</p>
+          </div>
+        ) : (
+          <div class="dialog-body scroll-pane">
+            <CorrectionDiffRows changes={plan.changes} lines={plan.next.lines} />
+          </div>
+        )}
+        <div class="dialog-footer">
+          <md-text-button onClick={onCancel}>取消</md-text-button>
+          <md-filled-button onClick={onConfirm}>
+            {plan.changes.length === 0 ? '仅停用规则' : `确认修正 ${plan.changes.length} 行`}
+          </md-filled-button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CorrectionsPanel({
+  state,
+  onJump,
+  onRestore,
+}: {
+  state: ProjectState;
+  onJump: (lineId: string) => void;
+  onRestore: (record: CorrectionRecord) => void;
+}) {
+  if (state.corrections.length === 0) {
+    return (
+      <div class="inspector-body">
+        <div class="empty-state">
+          <span>✎</span>
+          <strong>还没有批量修正记录</strong>
+          <p>在“问题”页停用问题规则前，会先预览受影响行；确认后，修正记录会保存在这里，并可一键恢复当时内容。</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div class="inspector-body">
+      <div class="correction-hint">
+        记录保存在浏览器本地，重开后仍可查看或恢复；恢复会重新启用规则并还原受影响行的盲文、状态与备注。
+      </div>
+      {state.corrections.map((record) => (
+        <details class={`correction-record ${record.restored ? 'restored' : ''}`} key={record.id} open={false}>
+          <summary>
+            <div class="correction-summary-main">
+              <strong>{RULE_KIND_LABEL[record.ruleKind]}规则「{record.ruleSource} → {record.ruleOutput}」</strong>
+              <p>{formatTime(record.createdAt)} · 影响 {record.affectedCount} 行{record.approvedResetCount > 0 ? ` · ${record.approvedResetCount} 行已批准回退待核对` : ''}</p>
+            </div>
+            {record.restored ? <span class="restored-badge">已恢复{record.restoredAt ? ` · ${formatTime(record.restoredAt)}` : ''}</span> : <span class="pending-badge">可恢复</span>}
+          </summary>
+          <div class="correction-record-body">
+            <CorrectionDiffRows changes={record.changes} lines={state.lines} />
+            <div class="issue-actions">
+              {record.changes.some((change) => state.lines.some((line) => line.id === change.lineId)) && (
+                <md-text-button onClick={() => onJump(record.changes.find((change) => state.lines.some((line) => line.id === change.lineId))!.lineId)}>定位首行</md-text-button>
+              )}
+              {record.restored
+                ? <md-outlined-button disabled>已恢复当时内容</md-outlined-button>
+                : <md-filled-tonal-button onClick={() => onRestore(record)}>恢复当时内容</md-filled-tonal-button>}
+            </div>
+          </div>
+        </details>
+      ))}
+    </div>
+  );
+}
+
 export default function App() {
   const { state, history, commit, undo, redo, restore } = useProject();
-  const [inspectorTab, setInspectorTab] = useState<'issues' | 'rules' | 'versions'>('issues');
+  const [inspectorTab, setInspectorTab] = useState<'issues' | 'rules' | 'corrections' | 'versions'>('issues');
+  const [batchPreview, setBatchPreview] = useState<{ ruleId: string; plan: BatchFixPlan } | null>(null);
   const selectedLineRef = useRef(state.selectedLineId);
   selectedLineRef.current = state.selectedLineId;
 
@@ -515,6 +663,11 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      // 预览弹窗打开时，除弹窗自身处理的 Esc 外，屏蔽其他快捷键，避免未确认就改动正文。
+      if (batchPreview) {
+        if (event.key === 'Escape') setBatchPreview(null);
+        return;
+      }
       const modifier = event.metaKey || event.ctrlKey;
       const target = event.target as HTMLElement;
       const editing = /INPUT|TEXTAREA/.test(target.tagName) || target.isContentEditable;
@@ -591,12 +744,41 @@ export default function App() {
     });
   };
 
-  const batchFixRule = (ruleId: string) => {
-    commit('批量修正同类问题', (current) => {
-      const ruleSet = current.ruleSets.find((set) => set.id === current.activeRuleSetId) ?? current.ruleSets[0];
-      const nextSet = updateRuleInSet(ruleSet, ruleId, { enabled: false });
-      return analyzeProject({ ...current, ruleSets: current.ruleSets.map((set) => set.id === nextSet.id ? nextSet : set) });
+  // 第一步：只生成预览（组件内存状态），不改正文、不写本地存储。
+  const previewBatchFix = (ruleId: string) => {
+    const plan = buildBatchFix(state, ruleId);
+    if (plan) setBatchPreview({ ruleId, plan });
+  };
+
+  // 第二步：确认后才提交，只更新预览中的变化行，并留下可回看、可恢复的修正记录。
+  const confirmBatchFix = () => {
+    const preview = batchPreview;
+    if (!preview) return;
+    commit('停用规则并批量修正', (current) => {
+      // 以最新正文重新计算同一份方案，保证所见即所改。
+      const plan = buildBatchFix(current, preview.ruleId);
+      if (!plan) return current;
+      const record: CorrectionRecord = {
+        id: correctionId(),
+        createdAt: new Date().toISOString(),
+        ruleId: preview.ruleId,
+        ruleSetId: plan.ruleSetId,
+        ruleKind: plan.rule.kind,
+        ruleSource: plan.rule.source,
+        ruleOutput: plan.rule.output,
+        affectedCount: plan.changes.length,
+        approvedResetCount: plan.approvedResetCount,
+        restored: false,
+        changes: plan.changes,
+      };
+      return { ...plan.next, corrections: [record, ...current.corrections].slice(0, CORRECTIONS_LIMIT) };
     });
+    setBatchPreview(null);
+    setInspectorTab('corrections');
+  };
+
+  const restoreCorrectionRecord = (record: CorrectionRecord) => {
+    commit('恢复批量修正前内容', (current) => restoreCorrection(current, record));
   };
 
   const importCourse = (text: string) => {
@@ -690,6 +872,7 @@ export default function App() {
           <div class="inspector-tabs" role="tablist">
             <button class={inspectorTab === 'issues' ? 'active' : ''} onClick={() => setInspectorTab('issues')}>问题 {unresolvedCount > 0 && <span>{unresolvedCount}</span>}</button>
             <button class={inspectorTab === 'rules' ? 'active' : ''} onClick={() => setInspectorTab('rules')}>规则详情</button>
+            <button class={inspectorTab === 'corrections' ? 'active' : ''} onClick={() => setInspectorTab('corrections')}>修正 {state.corrections.length > 0 && <span>{state.corrections.length}</span>}</button>
             <button class={inspectorTab === 'versions' ? 'active' : ''} onClick={() => setInspectorTab('versions')}>版本 {state.versions.length > 0 && <span>{state.versions.length}</span>}</button>
           </div>
           {inspectorTab === 'issues' && (
@@ -698,7 +881,7 @@ export default function App() {
               lines={state.lines}
               onJump={(lineId) => selectLine(lineId, true)}
               onResolve={(issueId) => commit('标记问题已处理', (current) => ({ ...current, issues: current.issues.map((item) => item.id === issueId ? { ...item, resolved: true } : item) }))}
-              onBatchFix={batchFixRule}
+              onBatchFix={previewBatchFix}
             />
           )}
           {inspectorTab === 'rules' && <RuleDetailPanel state={state} onUpdateRule={updateRule} onDeleteRule={(ruleId) => {
@@ -707,12 +890,30 @@ export default function App() {
               ruleSets: current.ruleSets.map((set) => set.id === current.activeRuleSetId ? { ...set, rules: set.rules.filter((rule) => rule.id !== ruleId) } : set),
             }));
           }} />}
+          {inspectorTab === 'corrections' && (
+            <CorrectionsPanel
+              state={state}
+              onJump={(lineId) => selectLine(lineId, true)}
+              onRestore={restoreCorrectionRecord}
+            />
+          )}
           {inspectorTab === 'versions' && <VersionsPanel state={state} onSnapshot={() => recordVersion()} onRestore={(version) => {
-            const restored: ProjectState = cloneState({ ...version.snapshot, versions: state.versions });
+            const restored: ProjectState = cloneState({
+              ...version.snapshot,
+              corrections: mergeCorrections(state.corrections, version.snapshot.corrections ?? []),
+              versions: state.versions,
+            });
             restore(restored);
           }} />}
         </aside>
       </div>
+      {batchPreview && (
+        <BatchFixDialog
+          plan={batchPreview.plan}
+          onCancel={() => setBatchPreview(null)}
+          onConfirm={confirmBatchFix}
+        />
+      )}
     </div>
   );
 }

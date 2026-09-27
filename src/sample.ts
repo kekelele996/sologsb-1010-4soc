@@ -88,6 +88,7 @@ const base: ProjectState = {
     { id: 'line-7', source: 'Please measure 12 centimetres from the edge.', tokens: [], status: 'unchecked', note: '', continuesPrevious: false, continuesNext: false },
   ],
   issues: [],
+  corrections: [],
   versions: [],
   lastCheckedAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
