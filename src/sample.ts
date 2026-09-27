@@ -89,6 +89,7 @@ const base: ProjectState = {
   ],
   issues: [],
   versions: [],
+  corrections: [],
   lastCheckedAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 };

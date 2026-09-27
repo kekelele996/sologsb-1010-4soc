@@ -1,5 +1,8 @@
 import type {
+  BatchFixLineChange,
   BrailleToken,
+  CorrectionRecord,
+  LineStatus,
   ProofIssue,
   ProjectState,
   RuleSet,
@@ -249,4 +252,124 @@ export function outputText(state: ProjectState): string {
 
 export function brailleCellCount(state: ProjectState): number {
   return state.lines.reduce((total, line) => total + line.tokens.reduce((count, token) => count + token.braille.replace(/\s/g, '').length, 0), 0);
+}
+
+function lineBraille(line: TextbookLine): string {
+  return line.tokens.map((token) => token.braille).join('');
+}
+
+function findRule(state: ProjectState, ruleId: string): { ruleSet: RuleSet; rule?: TranscriptionRule } {
+  const ruleSet = state.ruleSets.find((item) => item.id === state.activeRuleSetId) ?? state.ruleSets[0];
+  return { ruleSet, rule: ruleSet.rules.find((item) => item.id === ruleId) };
+}
+
+/**
+ * 停用指定规则后重转录全文，但只返回“盲文结果确实变化”的行。
+ * 纯计算，不修改入参，供“先预览后确认”使用。
+ */
+export function buildBatchFixPreview(state: ProjectState, ruleId: string): {
+  rule?: TranscriptionRule;
+  ruleSet: RuleSet;
+  candidate: ProjectState;
+  changes: BatchFixLineChange[];
+  resetApprovedCount: number;
+} {
+  const { ruleSet, rule } = findRule(state, ruleId);
+  const nextSet = updateRuleInSet(ruleSet, ruleId, { enabled: false });
+  const candidate = analyzeProject({
+    ...state,
+    ruleSets: state.ruleSets.map((item) => (item.id === nextSet.id ? nextSet : item)),
+  });
+
+  const changes: BatchFixLineChange[] = [];
+  state.lines.forEach((line, index) => {
+    const afterLine = candidate.lines.find((item) => item.id === line.id);
+    if (!afterLine) return;
+    const beforeBraille = lineBraille(line);
+    const afterBraille = lineBraille(afterLine);
+    if (afterBraille === beforeBraille) return;
+
+    const statusBefore = line.status;
+    // 已批准行的盲文发生变化时，退回待核对；其余行状态保持不变。
+    const statusAfter: LineStatus = statusBefore === 'approved' ? 'questionable' : statusBefore;
+    changes.push({
+      lineId: line.id,
+      lineNumber: index + 1,
+      source: line.source,
+      brailleBefore: beforeBraille,
+      brailleAfter: afterBraille,
+      statusBefore,
+      statusAfter,
+    });
+  });
+
+  return {
+    rule,
+    ruleSet,
+    candidate,
+    changes,
+    resetApprovedCount: changes.filter((change) => change.statusBefore === 'approved').length,
+  };
+}
+
+/**
+ * 确认批量修正：停用规则、只替换结果变化的行（保留其他行的状态与备注），
+ * 未变化行保留原 token、状态、备注及其校对问题，并追加一条修正记录。
+ */
+export function applyBatchFix(state: ProjectState, ruleId: string): {
+  state: ProjectState;
+  record: CorrectionRecord;
+  changes: BatchFixLineChange[];
+} {
+  const { rule, candidate, changes } = buildBatchFixPreview(state, ruleId);
+  const changedIds = new Set(changes.map((change) => change.lineId));
+  const changeById = new Map(changes.map((change) => [change.lineId, change]));
+
+  const lines: TextbookLine[] = state.lines.map((line) => {
+    const change = changeById.get(line.id);
+    if (!change) return line;
+    const nextLine = candidate.lines.find((item) => item.id === line.id)!;
+    // analyzeProject 可能重算状态，这里按约定覆盖：批准变待核对，其余照旧；备注不动。
+    return { ...nextLine, status: change.statusAfter, note: line.note };
+  });
+
+  // 未变化行：原样保留其既有问题；变化行：使用候选状态重算出的新问题。
+  const issues = [
+    ...state.issues.filter((item) => !changedIds.has(item.lineId)),
+    ...candidate.issues.filter((item) => changedIds.has(item.lineId)),
+  ];
+
+  const now = new Date();
+  const { versions: _versions, corrections: _corrections, ...before } = state;
+  const record: CorrectionRecord = {
+    id: `fix-${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: now.toISOString(),
+    ruleId,
+    ruleSource: rule?.source ?? ruleId,
+    ruleOutput: rule?.output ?? '',
+    ruleSetId: state.activeRuleSetId,
+    changedLineCount: changes.length,
+    resetApprovedCount: changes.filter((change) => change.statusBefore === 'approved').length,
+    changes,
+    before,
+  };
+
+  const next: ProjectState = {
+    ...candidate,
+    lines,
+    issues,
+    corrections: [record, ...(state.corrections ?? [])].slice(0, 20),
+    updatedAt: now.toISOString(),
+  };
+
+  return { state: next, record, changes };
+}
+
+/** 恢复某次批量修正之前的正文（规则、行、状态、备注、问题），修正记录本身保留可查。 */
+export function restoreCorrectionState(state: ProjectState, record: CorrectionRecord): ProjectState {
+  return {
+    ...structuredClone(record.before),
+    versions: state.versions,
+    corrections: state.corrections,
+  };
 }

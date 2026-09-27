@@ -52,12 +52,40 @@ export interface ProofIssue {
   resolved: boolean;
 }
 
+/** 不含历史记录的正文快照，供版本与批量修正留档使用。 */
+export type ProjectSnapshot = Omit<ProjectState, 'versions' | 'corrections'>;
+
 export interface VersionSnapshot {
   id: string;
   name: string;
   createdAt: string;
   action: string;
-  snapshot: Omit<ProjectState, 'versions'>;
+  snapshot: ProjectSnapshot;
+}
+
+/** 批量停用规则时，单条课文行的修正前后对照。 */
+export interface BatchFixLineChange {
+  lineId: string;
+  lineNumber: number;
+  source: string;
+  brailleBefore: string;
+  brailleAfter: string;
+  statusBefore: LineStatus;
+  statusAfter: LineStatus;
+}
+
+/** 一次“停用规则并批量修正”的可回看记录，可整体恢复当时内容。 */
+export interface CorrectionRecord {
+  id: string;
+  createdAt: string;
+  ruleId: string;
+  ruleSource: string;
+  ruleOutput: string;
+  ruleSetId: string;
+  changedLineCount: number;
+  resetApprovedCount: number;
+  changes: BatchFixLineChange[];
+  before: ProjectSnapshot;
 }
 
 export interface ProjectState {
@@ -70,6 +98,7 @@ export interface ProjectState {
   selectedLineId: string;
   issues: ProofIssue[];
   versions: VersionSnapshot[];
+  corrections: CorrectionRecord[];
   lastCheckedAt: string;
   updatedAt: string;
 }

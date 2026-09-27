@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
-import { analyzeProject, brailleCellCount, makeRule, outputText, updateRuleInSet } from './braille';
+import { analyzeProject, applyBatchFix, brailleCellCount, buildBatchFixPreview, makeRule, outputText, restoreCorrectionState, updateRuleInSet } from './braille';
 import { createInitialProject } from './sample';
-import type { HistoryState, ProofIssue, ProjectState, TextbookLine, VersionSnapshot } from './types';
+import type { BatchFixLineChange, CorrectionRecord, HistoryState, LineStatus, ProofIssue, ProjectState, TextbookLine, VersionSnapshot } from './types';
 
 const STORAGE_KEY = 'sologsb-1010-braille-project-v1';
 const HISTORY_LIMIT = 60;
@@ -55,7 +55,8 @@ function loadInitialState(): ProjectState {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as ProjectState;
-      return analyzeProject(parsed);
+      // 兼容旧版草稿：补齐修正记录字段。
+      return analyzeProject({ ...parsed, corrections: parsed.corrections ?? [] });
     }
   } catch {
     // 清除损坏草稿并使用内置示例。
@@ -92,6 +93,13 @@ function issueLabel(issue: ProofIssue): string {
   if (issue.severity === 'warning') return '可疑';
   return '建议';
 }
+
+export const STATUS_LABELS: Record<LineStatus, string> = {
+  unchecked: '未检查',
+  questionable: '待核对',
+  reviewed: '已校对',
+  approved: '已批准',
+};
 
 function Section({ title, subtitle, action, children }: { title: string; subtitle?: string; action?: ComponentChildren; children: ComponentChildren }) {
   return (
@@ -414,7 +422,7 @@ function IssuesPanel({
             <div class="issue-actions">
               <md-text-button onClick={() => onJump(group[0].lineId)}>定位首处</md-text-button>
               {group[0].ruleId && group.length > 1 && (
-                <md-filled-tonal-button onClick={() => onBatchFix(group[0].ruleId!)}>停用规则并修正同类</md-filled-tonal-button>
+                <md-filled-tonal-button onClick={() => onBatchFix(group[0].ruleId!)}>预览停用规则并修正同类</md-filled-tonal-button>
               )}
               {!group[0].ruleId && group.length > 1 && (
                 <md-filled-tonal-button onClick={() => group.forEach((item) => onResolve(item.id))}>全部标记已处理</md-filled-tonal-button>
@@ -479,9 +487,155 @@ function VersionsPanel({ state, onSnapshot, onRestore }: { state: ProjectState; 
   );
 }
 
+interface BatchFixPreviewData {
+  ruleId: string;
+  ruleSource: string;
+  ruleOutput: string;
+  changes: BatchFixLineChange[];
+  resetApprovedCount: number;
+}
+
+function BatchFixDialog({
+  preview,
+  onCancel,
+  onConfirm,
+}: {
+  preview: BatchFixPreviewData;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onCancel();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onCancel]);
+
+  return (
+    <div class="modal-backdrop" onClick={onCancel}>
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-label="批量修正预览" onClick={(event: MouseEvent) => event.stopPropagation()}>
+        <div class="modal-head">
+          <div>
+            <span class="eyebrow">先预览 · 确认后才改正文</span>
+            <h2>停用规则并批量修正</h2>
+            <p>
+              将停用规则 <strong>“{preview.ruleSource}” → {preview.ruleOutput || '（无盲文输出）'}</strong>，
+              以下 {preview.changes.length} 行的盲文会变化，其余行不动。
+            </p>
+          </div>
+          <md-icon-button aria-label="关闭预览" onClick={onCancel}>×</md-icon-button>
+        </div>
+
+        <div class="modal-body scroll-pane">
+          {preview.changes.length === 0 ? (
+            <div class="empty-state compact">
+              <strong>没有课文行会变化</strong>
+              <p>停用该规则不会改变任何盲文结果。确认后仅停用规则本身，正文、状态和备注全部保留。</p>
+            </div>
+          ) : (
+            preview.changes.map((change) => (
+              <div class={`fix-row ${change.statusBefore === 'approved' ? 'approved-reset' : ''}`} key={change.lineId}>
+                <div class="fix-row-head">
+                  <span class="fix-line-no">第 {change.lineNumber} 行</span>
+                  <span class="fix-status-change">
+                    <span class={`line-status ${change.statusBefore}`} />
+                    {STATUS_LABELS[change.statusBefore]}
+                    {change.statusAfter !== change.statusBefore && (
+                      <>
+                        <span class="fix-arrow">→</span>
+                        <span class={`line-status ${change.statusAfter}`} />
+                        <strong>{STATUS_LABELS[change.statusAfter]}</strong>
+                      </>
+                    )}
+                  </span>
+                </div>
+                <div class="fix-source">{change.source || <em class="empty-preview">空行</em>}</div>
+                <div class="fix-braille before">
+                  <span>修正前</span>
+                  <div class="braille-string">{change.brailleBefore}</div>
+                </div>
+                <div class="fix-braille after">
+                  <span>修正后</span>
+                  <div class="braille-string">{change.brailleAfter}</div>
+                </div>
+                <div class="fix-note-hint">状态 {change.statusAfter !== change.statusBefore ? '退回待核对' : '保持不变'} · 备注照常保留</div>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div class="modal-foot">
+          <p>
+            {preview.changes.length > 0
+              ? preview.resetApprovedCount > 0
+                ? `其中 ${preview.resetApprovedCount} 行已批准，确认后将回到待核对。`
+                : '没有已批准行会受影响，其他行的校对状态与备注保持不变。'
+              : '确认后只会停用该规则。'}
+          </p>
+          <div class="modal-actions">
+            <md-outlined-button onClick={onCancel}>取消（正文不变）</md-outlined-button>
+            <md-filled-button onClick={onConfirm}>确认停用规则并修正 {preview.changes.length} 行</md-filled-button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CorrectionsPanel({ state, onRestore }: { state: ProjectState; onRestore: (record: CorrectionRecord) => void }) {
+  const records = state.corrections ?? [];
+  return (
+    <div class="inspector-body">
+      <div class="snapshot-callout">
+        <div>
+          <strong>批量修正记录</strong>
+          <p>每次“停用规则并修正”都会留档：影响行、修正前后盲文与状态，并可恢复修正前内容。记录保存在浏览器本地。</p>
+        </div>
+      </div>
+      {records.length === 0 && (
+        <div class="empty-state compact">
+          <strong>还没有批量修正记录</strong>
+          <p>在“问题”页对同类问题点击“停用规则并修正同类”，先预览影响行，确认后此处可回看与恢复。</p>
+        </div>
+      )}
+      <div class="correction-list">
+        {records.map((record) => (
+          <details class="correction-card" key={record.id}>
+            <summary>
+              <span class="correction-rule">{record.ruleSource || record.ruleId} → {record.ruleOutput || '—'}</span>
+              <span class="correction-meta">{record.changedLineCount} 行变化 · {formatTime(record.createdAt)}</span>
+            </summary>
+            <p class="correction-desc">
+              停用该规则后修正 {record.changedLineCount} 行
+              {record.resetApprovedCount > 0 && `，其中 ${record.resetApprovedCount} 行已批准并退回待核对`}
+              ；未列出的行状态与备注保持不变。
+            </p>
+            <div class="correction-changes">
+              {record.changes.map((change) => (
+                <div class="correction-change" key={change.lineId}>
+                  <span class="fix-line-no">第 {change.lineNumber} 行</span>
+                  <div class="fix-braille before compact"><span>前</span><div class="braille-string">{change.brailleBefore}</div></div>
+                  <div class="fix-braille after compact"><span>后</span><div class="braille-string">{change.brailleAfter}</div></div>
+                  <div class="fix-note-hint">
+                    {STATUS_LABELS[change.statusBefore]}
+                    {change.statusAfter !== change.statusBefore && ` → ${STATUS_LABELS[change.statusAfter]}`}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <md-text-button onClick={() => onRestore(record)}>恢复修正前内容</md-text-button>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const { state, history, commit, undo, redo, restore } = useProject();
-  const [inspectorTab, setInspectorTab] = useState<'issues' | 'rules' | 'versions'>('issues');
+  const [inspectorTab, setInspectorTab] = useState<'issues' | 'rules' | 'corrections' | 'versions'>('issues');
+  const [batchPreview, setBatchPreview] = useState<BatchFixPreviewData | null>(null);
   const selectedLineRef = useRef(state.selectedLineId);
   selectedLineRef.current = state.selectedLineId;
 
@@ -549,7 +703,7 @@ export default function App() {
   });
 
   const createSnapshot = (action: string, source = state): VersionSnapshot => {
-    const { versions: _versions, ...snapshot } = cloneState(source);
+    const { versions: _versions, corrections: _corrections, ...snapshot } = cloneState(source);
     return {
       id: `version-${Date.now().toString(36)}`,
       name: `${action} · ${source.lines.filter((line) => line.status === 'approved').length}/${source.lines.length} 行完成`,
@@ -591,12 +745,34 @@ export default function App() {
     });
   };
 
-  const batchFixRule = (ruleId: string) => {
-    commit('批量修正同类问题', (current) => {
-      const ruleSet = current.ruleSets.find((set) => set.id === current.activeRuleSetId) ?? current.ruleSets[0];
-      const nextSet = updateRuleInSet(ruleSet, ruleId, { enabled: false });
-      return analyzeProject({ ...current, ruleSets: current.ruleSets.map((set) => set.id === nextSet.id ? nextSet : set) });
+  /** 点击“停用规则并修正同类”：只计算预览，不改正文。 */
+  const previewBatchFix = (ruleId: string) => {
+    const result = buildBatchFixPreview(state, ruleId);
+    setBatchPreview({
+      ruleId,
+      ruleSource: result.rule?.source ?? ruleId,
+      ruleOutput: result.rule?.output ?? '',
+      changes: result.changes,
+      resetApprovedCount: result.resetApprovedCount,
     });
+  };
+
+  const cancelBatchFix = () => setBatchPreview(null);
+
+  /** 确认后：只更新变化行，追加修正记录；取消或关闭对话框不动任何内容。 */
+  const confirmBatchFix = () => {
+    const preview = batchPreview;
+    if (!preview) return;
+    const ruleId = preview.ruleId;
+    commit('批量修正同类问题', (current) => {
+      const { state: next } = applyBatchFix(current, ruleId);
+      return next;
+    });
+    setBatchPreview(null);
+  };
+
+  const restoreCorrection = (record: CorrectionRecord) => {
+    restore(restoreCorrectionState(state, record));
   };
 
   const importCourse = (text: string) => {
@@ -690,6 +866,7 @@ export default function App() {
           <div class="inspector-tabs" role="tablist">
             <button class={inspectorTab === 'issues' ? 'active' : ''} onClick={() => setInspectorTab('issues')}>问题 {unresolvedCount > 0 && <span>{unresolvedCount}</span>}</button>
             <button class={inspectorTab === 'rules' ? 'active' : ''} onClick={() => setInspectorTab('rules')}>规则详情</button>
+            <button class={inspectorTab === 'corrections' ? 'active' : ''} onClick={() => setInspectorTab('corrections')}>修正 {state.corrections.length > 0 && <span>{state.corrections.length}</span>}</button>
             <button class={inspectorTab === 'versions' ? 'active' : ''} onClick={() => setInspectorTab('versions')}>版本 {state.versions.length > 0 && <span>{state.versions.length}</span>}</button>
           </div>
           {inspectorTab === 'issues' && (
@@ -698,7 +875,7 @@ export default function App() {
               lines={state.lines}
               onJump={(lineId) => selectLine(lineId, true)}
               onResolve={(issueId) => commit('标记问题已处理', (current) => ({ ...current, issues: current.issues.map((item) => item.id === issueId ? { ...item, resolved: true } : item) }))}
-              onBatchFix={batchFixRule}
+              onBatchFix={previewBatchFix}
             />
           )}
           {inspectorTab === 'rules' && <RuleDetailPanel state={state} onUpdateRule={updateRule} onDeleteRule={(ruleId) => {
@@ -707,12 +884,15 @@ export default function App() {
               ruleSets: current.ruleSets.map((set) => set.id === current.activeRuleSetId ? { ...set, rules: set.rules.filter((rule) => rule.id !== ruleId) } : set),
             }));
           }} />}
+          {inspectorTab === 'corrections' && <CorrectionsPanel state={state} onRestore={restoreCorrection} />}
           {inspectorTab === 'versions' && <VersionsPanel state={state} onSnapshot={() => recordVersion()} onRestore={(version) => {
-            const restored: ProjectState = cloneState({ ...version.snapshot, versions: state.versions });
+            const restored: ProjectState = cloneState({ ...version.snapshot, versions: state.versions, corrections: state.corrections });
             restore(restored);
           }} />}
         </aside>
       </div>
+
+      {batchPreview && <BatchFixDialog preview={batchPreview} onCancel={cancelBatchFix} onConfirm={confirmBatchFix} />}
     </div>
   );
 }
